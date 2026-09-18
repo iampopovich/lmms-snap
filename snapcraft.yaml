@@ -36,6 +36,19 @@ apps:
     common-id: io.lmms.LMMS
     environment:
       QT_QPA_PLATFORMTHEME: xdgdesktopportal
+      # No usable libcarla_native-plugin.so is bundled (the upstream
+      # AppImage only ships it as an optional plugin that expects a
+      # system-installed Carla; see apprun-hooks/carla-hook.sh). Excluding
+      # it here mirrors what the AppImage's own launcher does when Carla
+      # isn't found on the host, instead of leaving a plugin with an
+      # unresolved dependency in the plugin list.
+      LMMS_EXCLUDE_PLUGINS: libcarla
+      # LMMS's own AppImage bundles a dummy libjack.so.0 fallback and
+      # only prefers a real one via LD_LIBRARY_PATH when JACK is
+      # genuinely installed (see apprun-hooks/jack-hook.sh). We always
+      # use the bundled dummy: strict snap confinement has no route to a
+      # host JACK server anyway, so there is nothing to prefer.
+      LD_LIBRARY_PATH: $SNAP/usr/lib/jack:$LD_LIBRARY_PATH
     extensions: [gnome]
     plugs:
       - unity7
@@ -95,6 +108,18 @@ parts:
       chmod +x lmms.AppImage
       ./lmms.AppImage --appimage-extract
       mv -f squashfs-root/usr "$CRAFT_PART_INSTALL/usr"
+
+      # Drop the Carla plugins: their shared dependency
+      # (libcarla_native-plugin.so) is never actually bundled in the
+      # upstream AppImage, it's only usable when a system Carla install
+      # provides it (see apprun-hooks/carla-hook.sh). Shipping the
+      # broken .so files serves no purpose other than failing library
+      # lint checks, so remove them outright rather than trying to
+      # silence the warning.
+      rm -f "$CRAFT_PART_INSTALL"/usr/lib/libcarlabase.so
+      rm -f "$CRAFT_PART_INSTALL"/usr/lib/lmms/libcarlabase.so
+      rm -f "$CRAFT_PART_INSTALL"/usr/lib/lmms/libcarlapatchbay.so
+      rm -f "$CRAFT_PART_INSTALL"/usr/lib/lmms/libcarlarack.so
 
       sed -i 's|Name=LMMS|Name=LMMS (Unofficial)|' "$CRAFT_PART_INSTALL/usr/share/applications/lmms.desktop"
 

@@ -96,6 +96,34 @@ jobs:
           SNAPCRAFT_BUILD_ENVIRONMENT: lxd
           SNAPCRAFT_BUILD_ENVIRONMENT_MEMORY: 4G
 
+      - name: Smoke test - no missing shared libraries
+        if: matrix.arch == 'amd64'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq squashfs-tools
+          unsquashfs -d smoke-test-root "${{ steps.build.outputs.snap }}"
+          missing=0
+          while IFS= read -r -d '' f; do
+            out=$(ldd "$f" 2>/dev/null | grep "not found" || true)
+            if [ -n "$out" ]; then
+              echo "::error::Missing shared libraries in $f"
+              echo "$out"
+              missing=1
+            fi
+          done < <(find smoke-test-root -type f \( -name '*.so*' -o -perm -u+x \) -print0)
+          if [ "$missing" -eq 1 ]; then
+            echo "::error::Snap has unresolved shared library dependencies - see above. Fix before publishing."
+            exit 1
+          fi
+          echo "No missing shared libraries found."
+
+          # Also actually launch the binary (offscreen, no display needed)
+          # so a missing dependency that ldd can't see (e.g. a dlopen'd
+          # plugin failing at runtime) has a chance to surface too.
+          QT_QPA_PLATFORM=offscreen \
+          LD_LIBRARY_PATH="$PWD/smoke-test-root/usr/lib/jack:${LD_LIBRARY_PATH:-}" \
+          timeout 20 smoke-test-root/usr/bin/lmms --version
+
       - name: Publish to edge
         uses: snapcore/action-publish@v1
         env:
@@ -131,6 +159,30 @@ jobs:
         env:
           SNAPCRAFT_BUILD_ENVIRONMENT: lxd
           SNAPCRAFT_BUILD_ENVIRONMENT_MEMORY: 4G
+
+      - name: Smoke test - no missing shared libraries
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq squashfs-tools
+          unsquashfs -d smoke-test-root "${{ steps.build.outputs.snap }}"
+          missing=0
+          while IFS= read -r -d '' f; do
+            out=$(ldd "$f" 2>/dev/null | grep "not found" || true)
+            if [ -n "$out" ]; then
+              echo "::error::Missing shared libraries in $f"
+              echo "$out"
+              missing=1
+            fi
+          done < <(find smoke-test-root -type f \( -name '*.so*' -o -perm -u+x \) -print0)
+          if [ "$missing" -eq 1 ]; then
+            echo "::error::Snap has unresolved shared library dependencies - see above. Fix before publishing."
+            exit 1
+          fi
+          echo "No missing shared libraries found."
+
+          QT_QPA_PLATFORM=offscreen \
+          LD_LIBRARY_PATH="$PWD/smoke-test-root/usr/lib/jack:${LD_LIBRARY_PATH:-}" \
+          timeout 20 smoke-test-root/usr/bin/lmms --version
 
       - name: Publish to candidate (soak before stable)
         uses: snapcore/action-publish@v1
