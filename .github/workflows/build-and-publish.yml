@@ -102,9 +102,27 @@ jobs:
           set -euo pipefail
           sudo apt-get update -qq && sudo apt-get install -y -qq squashfs-tools
           unsquashfs -d smoke-test-root "${{ steps.build.outputs.snap }}"
+
+          # Mirror the LD_LIBRARY_PATH that `apps.environment` in
+          # snapcraft.yaml sets at runtime (bundled dummy libjack.so.0).
+          # Must be exported BEFORE the ldd scan below, not just before the
+          # final --version launch - otherwise the scan checks a different
+          # (unconfined) resolver path than what the installed snap
+          # actually uses and reports false-positive missing libraries.
+          export LD_LIBRARY_PATH="$PWD/smoke-test-root/usr/lib/jack:${LD_LIBRARY_PATH:-}"
+
           missing=0
           while IFS= read -r -d '' f; do
             out=$(ldd "$f" 2>/dev/null | grep "not found" || true)
+            # libEGL.so.1 is intentionally not bundled: the `gnome`
+            # extension supplies Mesa/EGL at runtime via the gpu-2404
+            # content interface mounted by snapd, not inside the .snap
+            # itself. unsquashfs-ing the package outside of snapd (as
+            # this smoke test does) can never see that mount, so an
+            # EGL-only "not found" here is an expected false positive,
+            # not a real missing-dependency bug. Any OTHER missing
+            # library on the same file still fails the build.
+            out=$(echo "$out" | grep -v 'libEGL\.so\.1' || true)
             if [ -n "$out" ]; then
               echo "::error::Missing shared libraries in $f"
               echo "$out"
@@ -121,7 +139,6 @@ jobs:
           # so a missing dependency that ldd can't see (e.g. a dlopen'd
           # plugin failing at runtime) has a chance to surface too.
           QT_QPA_PLATFORM=offscreen \
-          LD_LIBRARY_PATH="$PWD/smoke-test-root/usr/lib/jack:${LD_LIBRARY_PATH:-}" \
           timeout 20 smoke-test-root/usr/bin/lmms --version
 
       - name: Publish to edge
@@ -165,9 +182,20 @@ jobs:
           set -euo pipefail
           sudo apt-get update -qq && sudo apt-get install -y -qq squashfs-tools
           unsquashfs -d smoke-test-root "${{ steps.build.outputs.snap }}"
+
+          # Mirror the LD_LIBRARY_PATH that `apps.environment` in
+          # snapcraft.yaml sets at runtime (bundled dummy libjack.so.0).
+          # Must be exported BEFORE the ldd scan below - see edge job for
+          # why (false-positive "not found" otherwise).
+          export LD_LIBRARY_PATH="$PWD/smoke-test-root/usr/lib/jack:${LD_LIBRARY_PATH:-}"
+
           missing=0
           while IFS= read -r -d '' f; do
             out=$(ldd "$f" 2>/dev/null | grep "not found" || true)
+            # See edge job for why libEGL.so.1 is filtered here (supplied
+            # at runtime by the gnome extension's gpu-2404 content
+            # interface, invisible to an unsquashfs done outside snapd).
+            out=$(echo "$out" | grep -v 'libEGL\.so\.1' || true)
             if [ -n "$out" ]; then
               echo "::error::Missing shared libraries in $f"
               echo "$out"
@@ -181,7 +209,6 @@ jobs:
           echo "No missing shared libraries found."
 
           QT_QPA_PLATFORM=offscreen \
-          LD_LIBRARY_PATH="$PWD/smoke-test-root/usr/lib/jack:${LD_LIBRARY_PATH:-}" \
           timeout 20 smoke-test-root/usr/bin/lmms --version
 
       - name: Publish to candidate (soak before stable)
