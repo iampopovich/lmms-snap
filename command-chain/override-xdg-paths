@@ -1,0 +1,20 @@
+#!/bin/bash
+
+unset QT_QPA_PLATFORM
+
+export XDG_CONFIG_HOME="$SNAP_USER_COMMON/.config"
+export XDG_DATA_HOME="$SNAP_USER_COMMON/.local/share"
+export XDG_CACHE_HOME="$SNAP_USER_COMMON/.cache"
+
+mkdir -p "$XDG_CONFIG_HOME"
+mkdir -p "$XDG_DATA_HOME"
+mkdir -p "$XDG_CACHE_HOME"
+
+# Migrate any pre-existing LMMS config from the classic snap layout, in
+# case a previous non-strict install left data under SNAP_USER_DATA.
+if [ -d "$SNAP_USER_DATA/.lmmsrc.xml" ] && [ ! -f "$XDG_CONFIG_HOME/LMMS/lmmsrc.xml" ]; then
+    mkdir -p "$XDG_CONFIG_HOME/LMMS"
+    cp -r "$SNAP_USER_DATA/.lmmsrc.xml" "$XDG_CONFIG_HOME/LMMS/lmmsrc.xml" || true
+fi
+
+exec "$@"

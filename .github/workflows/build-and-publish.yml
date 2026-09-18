@@ -1,0 +1,157 @@
+name: Build and publish snap
+
+on:
+  schedule:
+    # Every 24 hours - LMMS upstream ships GitHub Releases (incl. alpha/
+    # pre-release tags) far less frequently than the emulator projects this
+    # workflow was adapted from; a daily check is plenty.
+    - cron: '0 6 * * *'
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - snapcraft.yaml
+      - command-chain/**
+      - .github/workflows/build-and-publish.yml
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    outputs:
+      edge_new: ${{ steps.check.outputs.edge_new }}
+      edge_tag: ${{ steps.check.outputs.edge_tag }}
+      stable_new: ${{ steps.check.outputs.stable_new }}
+      stable_tag: ${{ steps.check.outputs.stable_tag }}
+    steps:
+      - name: Compare upstream releases with published snap channels
+        id: check
+        run: |
+          set -euo pipefail
+
+          curl -s "https://api.github.com/repos/LMMS/lmms/releases" -o releases.json
+
+          # Newest release of ANY kind (alpha/rc included) -> edge channel
+          EDGE_TAG=$(python3 -c "import json; d=json.load(open('releases.json')); print(d[0]['tag_name'] if d else '')")
+          echo "Newest release overall (edge candidate): $EDGE_TAG"
+
+          # Newest NON-prerelease release -> stable channel
+          STABLE_TAG=$(python3 -c "
+          import json
+          d = json.load(open('releases.json'))
+          stable = [r['tag_name'] for r in d if not r.get('prerelease') and not r.get('draft')]
+          print(stable[0] if stable else '')
+          ")
+          echo "Newest stable release (stable candidate): $STABLE_TAG"
+
+          EDGE_PUBLISHED=$(curl -s "https://api.snapcraft.io/v2/snaps/info/lmms-unofficial" \
+            -H "Snap-Device-Series: 16" | \
+            python3 -c "import json,sys; d=json.load(sys.stdin); ch=[c for c in d.get('channel-map',[]) if c['channel']['name']=='edge']; print(ch[0]['version'] if ch else '')" || true)
+          echo "Currently published on edge: $EDGE_PUBLISHED"
+
+          STABLE_PUBLISHED=$(curl -s "https://api.snapcraft.io/v2/snaps/info/lmms-unofficial" \
+            -H "Snap-Device-Series: 16" | \
+            python3 -c "import json,sys; d=json.load(sys.stdin); ch=[c for c in d.get('channel-map',[]) if c['channel']['name']=='stable']; print(ch[0]['version'] if ch else '')" || true)
+          echo "Currently published on stable: $STABLE_PUBLISHED"
+
+          FORCE="false"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "push" ]; then
+            FORCE="true"
+          fi
+
+          if [ -n "$EDGE_TAG" ] && { [ "${EDGE_TAG#v}" != "$EDGE_PUBLISHED" ] || [ "$FORCE" = "true" ]; }; then
+            echo "edge_new=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "edge_new=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "edge_tag=$EDGE_TAG" >> "$GITHUB_OUTPUT"
+
+          if [ -n "$STABLE_TAG" ] && { [ "${STABLE_TAG#v}" != "$STABLE_PUBLISHED" ] || [ "$FORCE" = "true" ]; }; then
+            echo "stable_new=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "stable_new=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "stable_tag=$STABLE_TAG" >> "$GITHUB_OUTPUT"
+
+  build-and-publish-edge:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.edge_new == 'true' && needs.check-upstream.outputs.edge_tag != ''
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    env:
+      LMMS_RELEASE_TAG: ${{ needs.check-upstream.outputs.edge_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install snapcraft
+        run: sudo snap install snapcraft --classic
+
+      - name: Build snap (${{ matrix.arch }})
+        uses: snapcore/action-build@v1
+        id: build
+        with:
+          path: .
+        env:
+          SNAPCRAFT_BUILD_ENVIRONMENT: lxd
+          SNAPCRAFT_BUILD_ENVIRONMENT_MEMORY: 4G
+
+      - name: Publish to edge
+        uses: snapcore/action-publish@v1
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        with:
+          snap: ${{ steps.build.outputs.snap }}
+          release: edge
+
+  build-and-publish-stable:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.stable_new == 'true' && needs.check-upstream.outputs.stable_tag != ''
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # NOTE: as of this writing, the only "stable" (non-prerelease)
+        # LMMS release is v1.2.2, which ships a linux-x86_64 AppImage only
+        # (no arm64 asset). Widen this matrix to [amd64, arm64] once
+        # upstream cuts a stable release with an arm64 asset.
+        arch: [amd64]
+    env:
+      LMMS_RELEASE_TAG: ${{ needs.check-upstream.outputs.stable_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install snapcraft
+        run: sudo snap install snapcraft --classic
+
+      - name: Build snap (${{ matrix.arch }})
+        uses: snapcore/action-build@v1
+        id: build
+        with:
+          path: .
+        env:
+          SNAPCRAFT_BUILD_ENVIRONMENT: lxd
+          SNAPCRAFT_BUILD_ENVIRONMENT_MEMORY: 4G
+
+      - name: Publish to candidate (soak before stable)
+        uses: snapcore/action-publish@v1
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        with:
+          snap: ${{ steps.build.outputs.snap }}
+          release: candidate
+
+  promote-stable-to-stable:
+    needs: [check-upstream, build-and-publish-stable]
+    if: needs.check-upstream.outputs.stable_new == 'true'
+    runs-on: ubuntu-latest
+    # Give candidate a little soak time before promoting; adjust/remove if
+    # you want instant stable releases instead of a candidate -> stable gate.
+    steps:
+      - name: Install snapcraft
+        run: sudo snap install snapcraft --classic
+
+      - name: Promote candidate to stable
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        run: |
+          snapcraft promote lmms-unofficial --from-channel=candidate --to-channel=stable --yes

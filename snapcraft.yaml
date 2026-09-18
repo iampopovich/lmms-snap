@@ -1,0 +1,110 @@
+name: lmms-unofficial
+base: core24
+adopt-info: lmms-app
+platforms:
+  amd64:
+    build-on: [amd64]
+    build-for: [amd64]
+  arm64:
+    build-on: [arm64]
+    build-for: [arm64]
+summary: Unofficial builds of LMMS, the free cross-platform music production studio
+description: |
+  LMMS (Linux MultiMedia Studio) is a free, open-source, cross-platform
+  digital audio workstation. It includes a Piano Roll, Beat/Bassline editor,
+  Song editor, FX mixer, and comes bundled with 15+ synthesizer plugins plus
+  VST2 and SoundFont2 support.
+
+  This is an UNOFFICIAL, community-maintained repackaging of the official
+  LMMS Linux AppImage releases published at https://github.com/LMMS/lmms.
+  It is not published, endorsed, or affiliated with the LMMS project or its
+  maintainers. LMMS is licensed under the GNU General Public License v2.0
+  or later; see https://github.com/LMMS/lmms/blob/master/LICENSE.txt.
+
+  The `stable` channel tracks the newest non-prerelease GitHub Release.
+  The `edge` channel tracks the newest GitHub Release of any kind,
+  including alpha/pre-release builds, so users can choose their risk level.
+grade: stable
+confinement: strict
+icon: lmms.svg
+
+apps:
+  lmms-unofficial:
+    command-chain: [snap/command-chain/override-xdg-paths]
+    command: usr/bin/lmms
+    desktop: usr/share/applications/lmms.desktop
+    common-id: io.lmms.LMMS
+    environment:
+      QT_QPA_PLATFORMTHEME: xdgdesktopportal
+    extensions: [gnome]
+    plugs:
+      - unity7
+      - screen-inhibit-control
+      - audio-playback
+      - audio-record
+      - alsa
+      - pulseaudio
+      - network
+      - home
+      - removable-media
+      - mount-observe
+      - joystick
+      - raw-usb
+
+plugs:
+  shared-memory:
+    private: true
+
+parts:
+  lmms-app:
+    plugin: nil
+    build-packages: [wget, curl, jq]
+    override-build: |
+      set -euo pipefail
+
+      # LMMS_RELEASE_TAG / LMMS_RELEASE_PRERELEASE can be injected by CI
+      # (see .github/workflows/build-and-publish.yml) to pin an exact
+      # release. Falls back to "newest release of any kind" for local/
+      # manual builds.
+      if [ -n "${LMMS_RELEASE_TAG:-}" ]; then
+        TAG="$LMMS_RELEASE_TAG"
+      else
+        TAG=$(curl -s "https://api.github.com/repos/LMMS/lmms/releases" | \
+          python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['tag_name'])")
+      fi
+      echo "Building LMMS release: $TAG"
+
+      if [ "$CRAFT_ARCH_TRIPLET_BUILD_FOR" = "x86_64-linux-gnu" ]; then
+        ARCH_SUFFIX="linux-x86_64"
+      elif [ "$CRAFT_ARCH_TRIPLET_BUILD_FOR" = "aarch64-linux-gnu" ]; then
+        ARCH_SUFFIX="linux-arm64"
+      else
+        echo "Unsupported arch: $CRAFT_ARCH_TRIPLET_BUILD_FOR" >&2
+        exit 1
+      fi
+
+      URL="https://github.com/LMMS/lmms/releases/download/${TAG}/lmms-${TAG#v}-${ARCH_SUFFIX}.AppImage"
+      echo "Downloading: $URL"
+      if ! curl -sfIL "$URL" > /dev/null; then
+        echo "ERROR: no AppImage asset for $ARCH_SUFFIX on release $TAG" >&2
+        echo "(known case: v1.2.2 only ships a linux-x86_64 asset, no arm64)" >&2
+        exit 1
+      fi
+      wget -O lmms.AppImage "$URL"
+
+      chmod +x lmms.AppImage
+      ./lmms.AppImage --appimage-extract
+      mv -f squashfs-root/usr "$CRAFT_PART_INSTALL/usr"
+
+      sed -i 's|Name=LMMS|Name=LMMS (Unofficial)|' "$CRAFT_PART_INSTALL/usr/share/applications/lmms.desktop"
+
+      craftctl set version="${TAG#v}"
+    prime:
+      - usr
+
+  command-chain:
+    after: [lmms-app]
+    plugin: dump
+    source: ./command-chain/
+    organize:
+      override-xdg-paths: snap/command-chain/override-xdg-paths
